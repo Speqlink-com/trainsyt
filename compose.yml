@@ -1,0 +1,61 @@
+name: trainsyt
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trainsyt}
+      POSTGRES_USER: ${POSTGRES_USER:-trainsyt}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trainsyt-local-password}
+    volumes:
+      - trainsyt_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [trainsyt_internal]
+
+  migrate:
+    build: .
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${CONTAINER_DATABASE_URL:-postgresql+psycopg://trainsyt:trainsyt-local-password@postgres:5432/trainsyt}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && python -m app.scripts.seed_admin"]
+    networks: [trainsyt_internal]
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${CONTAINER_DATABASE_URL:-postgresql+psycopg://trainsyt:trainsyt-local-password@postgres:5432/trainsyt}
+      AUTO_MIGRATE: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${TRAINSYT_API_HOST:-127.0.0.1}:${TRAINSYT_API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    networks: [trainsyt_internal]
+
+volumes:
+  trainsyt_postgres_data:
+
+networks:
+  trainsyt_internal:
+    driver: bridge

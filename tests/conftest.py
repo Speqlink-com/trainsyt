@@ -1,0 +1,47 @@
+"""Isolated application and database fixtures."""
+
+import os
+from collections.abc import AsyncGenerator
+
+os.environ.update(
+    {
+        "DATABASE_URL": "sqlite+aiosqlite:////private/tmp/trainsyt-pytest.sqlite",
+        "ENVIRONMENT": "test",
+        "JWT_SECRET": "test-jwt-signing-secret-with-at-least-thirty-two-characters",
+        "INITIAL_ADMIN_SECRET_KEY": "test-bootstrap-secret-with-at-least-thirty-two-characters",
+        "SEED_ADMIN_EMAIL": "admin@example.com",
+        "SEED_ADMIN_PASSWORD": "AdminTest123!",
+        "SEED_ADMIN_FIRST_NAME": "Test",
+        "SEED_ADMIN_LAST_NAME": "Administrator",
+        "SMTP_USER": "mailer@example.com",
+        "SMTP_PASSWORD": "test-smtp-password",
+        "COOKIE_SECURE": "false",
+        "TRUSTED_HOSTS": "testserver,localhost,127.0.0.1",
+        "CORS_ORIGINS": "http://localhost:3000",
+    }
+)
+
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlmodel import SQLModel
+
+from app.core.database import async_session, engine
+from app.scripts.seed_admin import seed_admin
+from main import app
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def isolated_database() -> AsyncGenerator[None, None]:
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.drop_all)
+        await connection.run_sync(SQLModel.metadata.create_all)
+    async with async_session() as db:
+        await seed_admin(db)
+    yield
+
+
+@pytest_asyncio.fixture
+async def client() -> AsyncGenerator[AsyncClient, None]:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
+        yield test_client

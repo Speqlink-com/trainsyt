@@ -1,0 +1,12 @@
+Generic single-database configuration for Training Management Platform.
+
+This folder contains database migration files using Alembic.
+
+To create a new migration:
+    alembic revision --autogenerate -m "Description of changes"
+
+To apply migrations:
+    alembic upgrade head
+
+To downgrade:
+    alembic downgrade -1

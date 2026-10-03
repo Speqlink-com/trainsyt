@@ -1,0 +1,13 @@
+services:
+  api:
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      COOKIE_SECURE: "true"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  migrate:
+    environment:
+      ENVIRONMENT: production

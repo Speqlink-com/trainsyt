@@ -1,0 +1,47 @@
+[project]
+name = "trainsyt"
+version = "0.1.0"
+description = "Training Platform with Authentication System"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.19.1",
+    "fastapi>=0.141.1",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.15.0",
+    "sqlmodel>=0.0.39",
+    "bcrypt>=4.1.2",
+    "pyjwt>=2.8.0",
+    "python-multipart>=0.0.6",
+    "aiosqlite>=0.19.0",
+    "email-validator>=2.3.0",
+    "openpyxl>=3.1.5",
+    "python-dotenv>=1.0.0",
+    "psycopg[binary]>=3.2.10",
+    "uvicorn>=0.52.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "ruff>=0.14.6",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "B008",  # FastAPI intentionally uses Depends/Query calls as parameter defaults.
+    "E501",  # The formatter leaves long URLs, HTML email markup, and migrations intact.
+    "UP042", # SQLAlchemy persists these Enum member names; changing the base risks schema drift.
+]
