@@ -230,7 +230,7 @@ async def test_invitation_first_login_rotation_replay_and_admin_control(
     assert listing.json()["data"]["total"] == 1
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as trainer_client:
+    async with AsyncClient(transport=transport, base_url="http://testserver.local") as trainer_client:
         first_login = await login(
             trainer_client,
             "trainer@example.com",
@@ -266,7 +266,7 @@ async def test_invitation_first_login_rotation_replay_and_admin_control(
         assert refreshed.status_code == 200
         assert trainer_client.cookies["refresh_token"] != old_refresh
 
-        async with AsyncClient(transport=transport, base_url="http://testserver") as replay_client:
+        async with AsyncClient(transport=transport, base_url="http://testserver.local") as replay_client:
             replay_client.cookies.set("refresh_token", old_refresh)
             replay_client.cookies.set(settings.CSRF_COOKIE_NAME, "replay-csrf-token")
             replay = await replay_client.post(
@@ -388,7 +388,7 @@ async def test_password_reset_uses_one_time_hashed_code(client: AsyncClient, mon
     assert reused.status_code == 400
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as agent_client:
+    async with AsyncClient(transport=transport, base_url="http://testserver.local") as agent_client:
         response = await login(agent_client, "agent@example.com", "ResetSecure123!")
         assert response.status_code == 200
         assert response.json()["data"]["password_change_required"] is False

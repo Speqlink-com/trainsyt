@@ -23,8 +23,11 @@ os.environ.update(
         "EMAIL_DELIVERY_MODE": "console",
         "TRAINING_REMINDERS_ENABLED": "false",
         "COOKIE_SECURE": "false",
-        "TRUSTED_HOSTS": "testserver,localhost,127.0.0.1",
+        "COOKIE_DOMAIN": ".testserver.local",
+        "COOKIE_SAMESITE": "lax",
+        "TRUSTED_HOSTS": "testserver.local,localhost,127.0.0.1",
         "CORS_ORIGINS": "http://localhost:3000",
+        "FRONTEND_URL": "http://localhost:3000",
     }
 )
 
@@ -50,5 +53,5 @@ async def isolated_database() -> AsyncGenerator[None, None]:
 @pytest_asyncio.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as test_client:
+    async with AsyncClient(transport=transport, base_url="http://testserver.local") as test_client:
         yield test_client
