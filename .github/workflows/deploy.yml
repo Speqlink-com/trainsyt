@@ -17,9 +17,8 @@ env:
   IMAGE_NAME: trainsyt-server
   DEPLOY_DIR: /home/deploy/apps/trainsyt
   FRONTEND_URL: https://jb.training.speqlink.com
-  API_URL: https://server.training.speqlink.com
-  API_DOMAIN: server.training.speqlink.com
-  COOKIE_DOMAIN: .training.speqlink.com
+  API_URL: https://trainsyt.speqlink.com
+  API_DOMAIN: trainsyt.speqlink.com
 
 jobs:
   test:
@@ -170,7 +169,6 @@ jobs:
               "MAX_ADMIN_ACCOUNTS=6" \
               "COOKIE_SECURE=true" \
               "COOKIE_SAMESITE=lax" \
-              "COOKIE_DOMAIN=$COOKIE_DOMAIN" \
               "CORS_ORIGINS=$FRONTEND_URL" \
               "TRUSTED_HOSTS=$API_DOMAIN,127.0.0.1,localhost,trainsyt-api" \
               "FRONTEND_URL=$FRONTEND_URL" \

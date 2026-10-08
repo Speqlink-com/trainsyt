@@ -5,8 +5,8 @@ The production deployment follows the SafeSport pattern: GitHub-hosted CI runs t
 The configured origins are:
 
 - Frontend: `https://jb.training.speqlink.com`
-- API: `https://server.training.speqlink.com`
-- Shared authentication cookie domain: `.training.speqlink.com`
+- API: `https://trainsyt.speqlink.com`
+- Authentication cookies: host-only through the frontend's same-origin `/backend` proxy
 
 ## One-time VPS preparation
 
@@ -29,16 +29,16 @@ The stack publishes Nginx TLS on host port `2096` by default so it does not coll
 
 Before enabling the public health check:
 
-1. Create a proxied DNS record for `server.training.speqlink.com` pointing to the VPS public IP.
-2. Create or install a Cloudflare Origin Certificate covering `server.training.speqlink.com` (or `*.training.speqlink.com`) as `cert.pem` and `key.pem` in the directory above.
-3. Add a Cloudflare Origin Rule that routes `server.training.speqlink.com` to HTTPS port `2096`, matching the pattern already used by the other VPS applications.
+1. Create a proxied DNS record for `trainsyt.speqlink.com` pointing to the VPS public IP.
+2. Create or install a Cloudflare Origin Certificate covering `trainsyt.speqlink.com` (or `*.speqlink.com`) as `cert.pem` and `key.pem` in the directory above.
+3. Add a Cloudflare Origin Rule that routes `trainsyt.speqlink.com` to HTTPS port `2096`, matching the pattern already used by the other VPS applications.
 4. Use Full (strict) SSL mode.
-5. Confirm `https://server.training.speqlink.com/health/ready` returns a ready response.
+5. Confirm `https://trainsyt.speqlink.com/health/ready` returns a ready response.
 6. Set the GitHub production environment variable `TRAINSYT_PUBLIC_HEALTHCHECK_ENABLED=true`.
 
 Until step 6, deployments still perform a mandatory health check inside the API container. This permits the first deployment before the public DNS route exists.
 
-In the Vercel frontend project, set `NEXT_PUBLIC_API_URL=https://server.training.speqlink.com` for Production and redeploy the frontend after the API DNS record is active.
+In the Vercel frontend project, keep `NEXT_PUBLIC_API_URL=/backend`, set `API_PROXY_TARGET=https://trainsyt.speqlink.com`, and redeploy the frontend after the API DNS record is active.
 
 ## GitHub production environment
 
@@ -62,7 +62,7 @@ Optional environment variables:
 
 The deployment seeds `comsiwende@gmail.com` as the super administrator. Its initial `Admin123` password does not create a normal authenticated session: the first successful login receives only a short-lived password-change token and must set a strong replacement password immediately. Subsequent deployments never reset an existing administrator's password. The backend permits at most six active administrator accounts in total, including this seeded super administrator.
 
-The frontend and API are sibling subdomains by design. The readable CSRF cookie is scoped to `.training.speqlink.com`, allowing the frontend to send the required CSRF header while the access and refresh JWT cookies remain HttpOnly.
+The frontend sends API calls through its same-origin `/backend` proxy. This keeps the readable CSRF cookie available to the frontend while the access and refresh JWT cookies remain HttpOnly, without exposing authentication cookies to unrelated Speqlink subdomains.
 
 ## Deployment lifecycle
 
