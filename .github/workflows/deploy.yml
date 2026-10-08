@@ -47,7 +47,7 @@ jobs:
   deploy:
     name: Deploy production
     needs: test
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, trainsyt-prod]
     timeout-minutes: 35
     environment: production
     steps:

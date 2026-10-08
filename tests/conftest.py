@@ -2,10 +2,13 @@
 
 import os
 from collections.abc import AsyncGenerator
+from tempfile import gettempdir
 
 os.environ.update(
     {
-        "DATABASE_URL": "sqlite+aiosqlite:////private/tmp/trainsyt-pytest.sqlite",
+        "DATABASE_URL": (
+            f"sqlite+aiosqlite:///{gettempdir()}/trainsyt-pytest-{os.getpid()}.sqlite"
+        ),
         "ENVIRONMENT": "test",
         "JWT_SECRET": "test-jwt-signing-secret-with-at-least-thirty-two-characters",
         "INITIAL_ADMIN_SECRET_KEY": "test-bootstrap-secret-with-at-least-thirty-two-characters",
