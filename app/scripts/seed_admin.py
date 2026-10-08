@@ -31,9 +31,13 @@ async def seed_admin(db: AsyncSession) -> bool:
 
     email = settings.SEED_ADMIN_EMAIL.strip().lower()
     password = settings.SEED_ADMIN_PASSWORD.get_secret_value()
-    valid, message = validate_password_strength(password)
-    if not valid:
-        raise RuntimeError(f"SEED_ADMIN_PASSWORD is invalid: {message}")
+    if settings.SEED_ADMIN_FORCE_PASSWORD_CHANGE:
+        if len(password) < 8:
+            raise RuntimeError("Temporary SEED_ADMIN_PASSWORD must contain at least 8 characters")
+    else:
+        valid, message = validate_password_strength(password)
+        if not valid:
+            raise RuntimeError(f"SEED_ADMIN_PASSWORD is invalid: {message}")
 
     existing = await user_repository.get_user_by_email(db, email)
     if existing:
@@ -49,10 +53,12 @@ async def seed_admin(db: AsyncSession) -> bool:
         last_name=settings.SEED_ADMIN_LAST_NAME.strip(),
         role=UserRole.SUPER_ADMIN,
         is_active=True,
-        is_password_changed=True,
+        is_password_changed=not settings.SEED_ADMIN_FORCE_PASSWORD_CHANGE,
         is_email_verified=True,
         verified_at=utcnow(),
-        last_password_change_at=utcnow(),
+        last_password_change_at=(
+            None if settings.SEED_ADMIN_FORCE_PASSWORD_CHANGE else utcnow()
+        ),
     )
     db.add(user)
     await db.commit()

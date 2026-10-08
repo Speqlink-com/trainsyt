@@ -1,0 +1,272 @@
+name: Deploy TrainSyt API
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trainsyt-production
+  cancel-in-progress: false
+
+env:
+  DOCKERHUB_USERNAME: comphortinoe
+  IMAGE_NAME: trainsyt-server
+  DEPLOY_DIR: /home/deploy/apps/trainsyt
+  FRONTEND_URL: https://jb.training.speqlink.com
+  API_URL: https://server.training.speqlink.com
+  API_DOMAIN: server.training.speqlink.com
+  COOKIE_DOMAIN: .training.speqlink.com
+
+jobs:
+  test:
+    name: Test and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Lint
+        run: uv run --frozen ruff check app tests
+
+      - name: Test
+        run: uv run --frozen pytest -q
+
+  deploy:
+    name: Deploy production
+    needs: test
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 35
+    environment: production
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@v4
+        with:
+          clean: true
+          fetch-depth: 1
+
+      - name: Verify checkout
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Verify deployment configuration
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.TRAINSYT_DOCKERHUB_TOKEN }}
+          POSTGRES_PASSWORD: ${{ secrets.TRAINSYT_POSTGRES_PASSWORD }}
+          JWT_SECRET: ${{ secrets.TRAINSYT_JWT_SECRET }}
+          INITIAL_ADMIN_SECRET_KEY: ${{ secrets.TRAINSYT_INITIAL_ADMIN_SECRET_KEY }}
+          SEED_ADMIN_PASSWORD: ${{ secrets.TRAINSYT_SEED_ADMIN_PASSWORD }}
+          ZOHO_EMAIL: ${{ secrets.TRAINSYT_ZOHO_EMAIL }}
+          ZOHO_APP_PASSWORD: ${{ secrets.TRAINSYT_ZOHO_APP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.TRAINSYT_EMAIL_FROM }}
+        run: |
+          set -euo pipefail
+          required=(
+            DOCKERHUB_TOKEN POSTGRES_PASSWORD JWT_SECRET INITIAL_ADMIN_SECRET_KEY
+            SEED_ADMIN_PASSWORD ZOHO_EMAIL ZOHO_APP_PASSWORD EMAIL_FROM
+          )
+          for variable in "${required[@]}"; do
+            if [ -z "${!variable}" ]; then
+              echo "Required production secret is missing: ${variable}"
+              exit 1
+            fi
+          done
+          if [[ ! "$POSTGRES_PASSWORD" =~ ^[A-Za-z0-9_-]{32,}$ ]]; then
+            echo "TRAINSYT_POSTGRES_PASSWORD must be at least 32 URL-safe characters"
+            exit 1
+          fi
+          if [ "${#JWT_SECRET}" -lt 32 ] || [ "${#INITIAL_ADMIN_SECRET_KEY}" -lt 32 ]; then
+            echo "JWT and bootstrap secrets must each contain at least 32 characters"
+            exit 1
+          fi
+          if [ "$SEED_ADMIN_PASSWORD" != "Admin123" ]; then
+            echo "TRAINSYT_SEED_ADMIN_PASSWORD must be configured as the requested temporary password"
+            exit 1
+          fi
+
+      - name: Verify server-managed TLS certificate
+        run: |
+          set -euo pipefail
+          if [ ! -s "$DEPLOY_DIR/certs/cert.pem" ] || [ ! -s "$DEPLOY_DIR/certs/key.pem" ]; then
+            echo "Missing Cloudflare Origin Certificate files."
+            echo "Expected $DEPLOY_DIR/certs/cert.pem and $DEPLOY_DIR/certs/key.pem"
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.TRAINSYT_DOCKERHUB_TOKEN }}
+
+      - name: Build and push immutable image
+        env:
+          IMAGE_REPOSITORY: ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE_REPOSITORY:latest" || true
+          docker build \
+            --cache-from "$IMAGE_REPOSITORY:latest" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --tag "$IMAGE_REPOSITORY:$GITHUB_SHA" \
+            --tag "$IMAGE_REPOSITORY:latest" \
+            .
+          docker push "$IMAGE_REPOSITORY:$GITHUB_SHA"
+          docker push "$IMAGE_REPOSITORY:latest"
+
+      - name: Write server configuration
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.TRAINSYT_POSTGRES_PASSWORD }}
+          JWT_SECRET: ${{ secrets.TRAINSYT_JWT_SECRET }}
+          INITIAL_ADMIN_SECRET_KEY: ${{ secrets.TRAINSYT_INITIAL_ADMIN_SECRET_KEY }}
+          SEED_ADMIN_PASSWORD: ${{ secrets.TRAINSYT_SEED_ADMIN_PASSWORD }}
+          SEED_ADMIN_FIRST_NAME: ${{ vars.TRAINSYT_SEED_ADMIN_FIRST_NAME || 'Comfortine' }}
+          SEED_ADMIN_LAST_NAME: ${{ vars.TRAINSYT_SEED_ADMIN_LAST_NAME || 'Siwende' }}
+          ZOHO_EMAIL: ${{ secrets.TRAINSYT_ZOHO_EMAIL }}
+          ZOHO_APP_PASSWORD: ${{ secrets.TRAINSYT_ZOHO_APP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.TRAINSYT_EMAIL_FROM }}
+          HTTPS_PORT: ${{ vars.TRAINSYT_HTTPS_PORT || '2096' }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$DEPLOY_DIR" "$DEPLOY_DIR/certs" "$DEPLOY_DIR/backups"
+          install -m 600 docker-compose.prod.yml "$DEPLOY_DIR/docker-compose.prod.yml"
+          install -m 644 nginx.conf "$DEPLOY_DIR/nginx.conf"
+          umask 077
+          {
+            printf '%s\n' \
+              "APP_NAME=Jubilee Learning Hub" \
+              "ENVIRONMENT=production" \
+              "DEBUG=false" \
+              "LOG_LEVEL=INFO" \
+              "PORT=8000" \
+              "DATABASE_URL=postgresql+psycopg://trainsyt:$POSTGRES_PASSWORD@trainsyt-postgres:5432/trainsyt" \
+              "DATABASE_ECHO=false" \
+              "AUTO_MIGRATE=false" \
+              "JWT_SECRET=$JWT_SECRET" \
+              "JWT_ALGORITHM=HS256" \
+              "JWT_ISSUER=trainsyt-api" \
+              "JWT_AUDIENCE=trainsyt-web" \
+              "ACCESS_TOKEN_EXPIRE_MINUTES=15" \
+              "REFRESH_TOKEN_EXPIRE_DAYS=30" \
+              "TEMP_TOKEN_EXPIRE_MINUTES=15" \
+              "ATTENDANCE_TOKEN_EXPIRE_HOURS=72" \
+              "INITIAL_ADMIN_SECRET_KEY=$INITIAL_ADMIN_SECRET_KEY" \
+              "SEED_ADMIN_EMAIL=comsiwende@gmail.com" \
+              "SEED_ADMIN_PASSWORD=$SEED_ADMIN_PASSWORD" \
+              "SEED_ADMIN_FIRST_NAME=$SEED_ADMIN_FIRST_NAME" \
+              "SEED_ADMIN_LAST_NAME=$SEED_ADMIN_LAST_NAME" \
+              "SEED_ADMIN_FORCE_PASSWORD_CHANGE=true" \
+              "MAX_ADMIN_ACCOUNTS=6" \
+              "COOKIE_SECURE=true" \
+              "COOKIE_SAMESITE=lax" \
+              "COOKIE_DOMAIN=$COOKIE_DOMAIN" \
+              "CORS_ORIGINS=$FRONTEND_URL" \
+              "TRUSTED_HOSTS=$API_DOMAIN,127.0.0.1,localhost,trainsyt-api" \
+              "FRONTEND_URL=$FRONTEND_URL" \
+              "APP_TIMEZONE=Africa/Nairobi" \
+              "TRAINING_REMINDERS_ENABLED=true" \
+              "TRAINING_REMINDER_MINUTES=60" \
+              "TRAINING_REMINDER_POLL_SECONDS=60" \
+              "SMTP_HOST=smtp.zoho.com" \
+              "SMTP_PORT=587" \
+              "SMTP_STARTTLS=true" \
+              "ZOHO_EMAIL=$ZOHO_EMAIL" \
+              "ZOHO_APP_PASSWORD=$ZOHO_APP_PASSWORD" \
+              "EMAIL_FROM=$EMAIL_FROM" \
+              "EMAIL_FROM_NAME=Jubilee Learning Hub" \
+              "EMAIL_DELIVERY_MODE=smtp" \
+              "OTP_EXPIRE_MINUTES=10" \
+              "OTP_LENGTH=6" \
+              "OTP_MAX_ATTEMPTS=5" \
+              "OTP_RATE_LIMIT=3" \
+              "OTP_RATE_WINDOW_MINUTES=10" \
+              "LOGIN_MAX_ATTEMPTS=5" \
+              "LOGIN_LOCKOUT_MINUTES=30"
+          } > "$DEPLOY_DIR/.env.prod"
+          {
+            printf '%s\n' \
+              "DOCKERHUB_USERNAME=$DOCKERHUB_USERNAME" \
+              "IMAGE_TAG=$GITHUB_SHA" \
+              "POSTGRES_DB=trainsyt" \
+              "POSTGRES_USER=trainsyt" \
+              "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" \
+              "TRAINSYT_HTTPS_PORT=$HTTPS_PORT"
+          } > "$DEPLOY_DIR/.env.compose"
+
+      - name: Deploy database and API
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          compose=(docker compose --env-file .env.compose -f docker-compose.prod.yml)
+          "${compose[@]}" config --quiet
+          "${compose[@]}" pull
+          "${compose[@]}" up -d trainsyt-postgres
+
+          database_ready=false
+          for _ in {1..30}; do
+            if docker exec trainsyt-postgres pg_isready -U trainsyt -d trainsyt >/dev/null 2>&1; then
+              database_ready=true
+              break
+            fi
+            sleep 3
+          done
+          if [ "$database_ready" != true ]; then
+            docker logs --tail 100 trainsyt-postgres
+            exit 1
+          fi
+
+          backup_file="$DEPLOY_DIR/backups/trainsyt-predeploy-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+          docker exec trainsyt-postgres pg_dump -U trainsyt -d trainsyt | gzip -9 > "$backup_file"
+          chmod 600 "$backup_file"
+
+          "${compose[@]}" run --rm --no-deps trainsyt-api alembic upgrade head
+          "${compose[@]}" run --rm --no-deps trainsyt-api python -m app.scripts.seed_admin
+          "${compose[@]}" up -d --force-recreate trainsyt-api trainsyt-nginx
+
+      - name: Verify internal deployment
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          compose=(docker compose --env-file .env.compose -f docker-compose.prod.yml)
+          service_ready=false
+          for _ in {1..30}; do
+            if docker exec trainsyt-api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"; then
+              service_ready=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "$service_ready" != true ]; then
+            "${compose[@]}" ps
+            "${compose[@]}" logs --tail 150 trainsyt-api
+            exit 1
+          fi
+          "${compose[@]}" ps
+
+      - name: Verify public endpoint
+        if: ${{ vars.TRAINSYT_PUBLIC_HEALTHCHECK_ENABLED == 'true' }}
+        run: |
+          set -euo pipefail
+          for _ in {1..12}; do
+            if curl --fail --silent --show-error --max-time 15 "$API_URL/health/ready"; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker logs --tail 100 trainsyt-nginx
+          exit 1
+
+      - name: Remove dangling images
+        if: always()
+        run: docker image prune -f

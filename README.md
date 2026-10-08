@@ -12,6 +12,16 @@ docker compose up --build
 
 The API is available at `http://127.0.0.1:8000`, with readiness at `/health/ready` and OpenAPI documentation at `/docs`.
 
+Authentication emails use Zuri's direct Zoho SMTP pattern: configure `ZOHO_EMAIL`, `ZOHO_APP_PASSWORD`, `EMAIL_FROM`, `SMTP_HOST=smtp.zoho.com`, `SMTP_PORT=587`, and `SMTP_STARTTLS=true`. Set `EMAIL_DELIVERY_MODE=smtp` for real delivery. Tests and local workflows that must not send email can use `EMAIL_DELIVERY_MODE=console`; message contents and security codes are never written to logs.
+
+Test the configured sender without creating a user:
+
+```bash
+docker compose exec api python -m app.scripts.test_email
+```
+
+Pass an optional recipient address to test delivery to a specific mailbox.
+
 For reload-on-change development:
 
 ```bash
@@ -68,13 +78,15 @@ Administrators create accounts through `POST /api/auth/users`. A random temporar
 
 ## QR training attendance
 
-Administrators can assign programmes to active trainers, while trainers can create and manage their own programmes. Every programme receives an unguessable public code used by its shareable QR link. Participants do not need a platform account: the link accepts their name, role, and role-specific code, prevents duplicate registrations, enforces role eligibility and capacity, then issues a short-lived signed receipt used to mark attendance.
+Administrators can assign programmes to active trainers, while trainers can create and manage their own programmes. Every programme receives an unguessable public code used by its shareable QR link. Participants do not need a platform account: the link accepts their name, email, phone, role, and role-specific code, prevents duplicate identities, enforces role eligibility and capacity, then issues a short-lived signed receipt used to mark attendance. The API rejects attendance before the scheduled meeting time even if a client bypasses the browser controls.
+
+The API process also runs a persisted reminder scheduler. Every minute it finds programmes entering the configured 60-minute window and emails the assigned trainer plus registered participants. Successful deliveries are recorded on the programme/registration so restarts and later polling cycles do not resend them. Configure this with `TRAINING_REMINDERS_ENABLED`, `TRAINING_REMINDER_MINUTES`, `TRAINING_REMINDER_POLL_SECONDS`, and `APP_TIMEZONE`.
 
 Authenticated trainer and administrator endpoints:
 
 - `GET|POST /api/trainings`
 - `GET /api/trainings/trainers`
-- `GET /api/trainings/{id}`
+- `GET|PATCH|DELETE /api/trainings/{id}` (update/delete are administrator-only)
 - `PATCH /api/trainings/{id}/status`
 - `GET /api/trainings/attendance`
 - `GET /api/trainings/attendance/export.xlsx`
@@ -96,3 +108,7 @@ uv run pytest -q
 ```
 
 The tests use an isolated SQLite database while production and Docker use PostgreSQL through `psycopg`.
+
+## VPS deployment
+
+Production deployment through the VPS GitHub runner is defined in `.github/workflows/deploy.yml`. It builds an immutable image, backs up PostgreSQL, applies Alembic migrations, seeds the administrator idempotently, and health-checks the API. See [docs/deployment.md](docs/deployment.md) for the one-time server, Cloudflare, and GitHub environment setup.

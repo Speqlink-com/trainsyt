@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     SEED_ADMIN_PASSWORD: SecretStr | None = None
     SEED_ADMIN_FIRST_NAME: str = "System"
     SEED_ADMIN_LAST_NAME: str = "Administrator"
+    SEED_ADMIN_FORCE_PASSWORD_CHANGE: bool = False
+    MAX_ADMIN_ACCOUNTS: int = 6
 
     COOKIE_SECURE: bool = False
     COOKIE_SAMESITE: Literal["lax", "strict", "none"] = "lax"
@@ -60,14 +62,19 @@ class Settings(BaseSettings):
     )
     TRUSTED_HOSTS: str = "localhost,127.0.0.1,192.168.0.101,192.168.0.104"
 
-    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_HOST: str = "smtp.zoho.com"
     SMTP_PORT: int = 587
-    SMTP_USER: str | None = None
-    SMTP_PASSWORD: SecretStr | None = None
-    SMTP_USE_TLS: bool = True
-    FROM_EMAIL: str = "no-reply@trainsyt.local"
-    FROM_NAME: str = "Jubilee Learning Hub"
+    SMTP_STARTTLS: bool = True
+    ZOHO_EMAIL: str | None = None
+    ZOHO_APP_PASSWORD: SecretStr | None = None
+    EMAIL_FROM: str | None = None
+    EMAIL_FROM_NAME: str = "Jubilee Learning Hub"
+    EMAIL_DELIVERY_MODE: Literal["smtp", "console"] = "smtp"
     FRONTEND_URL: str = "http://localhost:3000"
+    APP_TIMEZONE: str = "Africa/Nairobi"
+    TRAINING_REMINDERS_ENABLED: bool = True
+    TRAINING_REMINDER_MINUTES: int = 60
+    TRAINING_REMINDER_POLL_SECONDS: int = 60
 
     OTP_EXPIRE_MINUTES: int = 10
     OTP_LENGTH: int = 6
@@ -82,7 +89,9 @@ class Settings(BaseSettings):
         "DATABASE_ECHO",
         "AUTO_MIGRATE",
         "COOKIE_SECURE",
-        "SMTP_USE_TLS",
+        "SMTP_STARTTLS",
+        "TRAINING_REMINDERS_ENABLED",
+        "SEED_ADMIN_FORCE_PASSWORD_CHANGE",
         mode="before",
     )
     @classmethod
@@ -106,13 +115,16 @@ class Settings(BaseSettings):
                 raise ValueError("INITIAL_ADMIN_SECRET_KEY must be replaced outside development")
             if not self.COOKIE_SECURE:
                 raise ValueError("COOKIE_SECURE must be true outside development")
-            if not self.smtp_configured:
+            if self.EMAIL_DELIVERY_MODE != "smtp" or not self.smtp_configured:
                 raise ValueError("SMTP credentials are required outside development")
             if not self.SEED_ADMIN_EMAIL or not self.SEED_ADMIN_PASSWORD:
                 raise ValueError("Seed administrator credentials are required outside development")
             seed_password = self.SEED_ADMIN_PASSWORD.get_secret_value()
-            if seed_password == "Admin123!@#" or len(seed_password) < 12:
-                raise ValueError("SEED_ADMIN_PASSWORD must be replaced with a strong production password")
+            minimum_seed_length = 8 if self.SEED_ADMIN_FORCE_PASSWORD_CHANGE else 12
+            if len(seed_password) < minimum_seed_length:
+                raise ValueError(
+                    f"SEED_ADMIN_PASSWORD must contain at least {minimum_seed_length} characters"
+                )
         if self.COOKIE_SAMESITE == "none" and not self.COOKIE_SECURE:
             raise ValueError("SameSite=None cookies require COOKIE_SECURE=true")
         if (
@@ -123,6 +135,10 @@ class Settings(BaseSettings):
             raise ValueError("Token expiry values must be positive")
         if self.LOGIN_MAX_ATTEMPTS < 1 or self.LOGIN_LOCKOUT_MINUTES < 1:
             raise ValueError("Login lockout values must be positive")
+        if self.MAX_ADMIN_ACCOUNTS < 1:
+            raise ValueError("MAX_ADMIN_ACCOUNTS must be positive")
+        if self.TRAINING_REMINDER_MINUTES < 1 or self.TRAINING_REMINDER_POLL_SECONDS < 10:
+            raise ValueError("Training reminder timing values must be positive")
         return self
 
     @property
@@ -135,7 +151,11 @@ class Settings(BaseSettings):
 
     @property
     def smtp_configured(self) -> bool:
-        return bool(self.SMTP_USER and self.SMTP_PASSWORD)
+        return bool(
+            self.ZOHO_EMAIL
+            and self.ZOHO_APP_PASSWORD
+            and self.EMAIL_FROM
+        )
 
     @property
     def is_development(self) -> bool:

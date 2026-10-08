@@ -2,8 +2,9 @@
 
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.core.identity import normalize_person_name, normalize_personnel_code, normalize_phone_number
 from app.models.enums import UserRole
 
 
@@ -70,8 +71,43 @@ class AdminCreateUserRequest(BaseModel):
     role: UserRole
     phone_number: str | None = Field(default=None, max_length=20)
     employee_id: str | None = Field(default=None, max_length=50)
+    agent_code: str | None = Field(default=None, max_length=20)
     branch_id: str | None = Field(default=None, max_length=50)
     department: str | None = Field(default=None, max_length=100)
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def valid_name(cls, value: str) -> str:
+        return normalize_person_name(value)
+
+    @field_validator("phone_number")
+    @classmethod
+    def valid_phone(cls, value: str | None) -> str | None:
+        return normalize_phone_number(value) if value else None
+
+    @field_validator("employee_id", "agent_code")
+    @classmethod
+    def valid_personnel_code(cls, value: str | None) -> str | None:
+        return normalize_personnel_code(value) if value else None
+
+    @field_validator("branch_id", "department")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        normalized = " ".join(value.strip().split()) if value else None
+        return normalized or None
+
+    @model_validator(mode="after")
+    def required_identity_fields(self) -> "AdminCreateUserRequest":
+        if not self.phone_number:
+            raise ValueError("A valid phone number is required for every user")
+        if self.role == UserRole.AGENT:
+            self.agent_code = self.agent_code or self.employee_id
+            self.employee_id = None
+            if not self.agent_code:
+                raise ValueError("Agent code is required for an agent")
+        elif not self.employee_id:
+            raise ValueError("Employee ID is required for this user role")
+        return self
 
 
 class UserStatusUpdateRequest(BaseModel):

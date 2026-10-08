@@ -35,7 +35,7 @@ class User(TimestampMixin, SoftDeleteMixin, SQLModel, table=True):
     # ========================================================================
     first_name: str = Field(max_length=100)
     last_name: str = Field(max_length=100)
-    phone_number: str | None = Field(default=None, max_length=20)
+    phone_number: str | None = Field(default=None, max_length=20, unique=True, index=True)
     profile_pic_url: str | None = Field(default=None, max_length=500)
 
     # ========================================================================
@@ -46,7 +46,7 @@ class User(TimestampMixin, SoftDeleteMixin, SQLModel, table=True):
     # ========================================================================
     # TRAINING SPECIFIC FIELDS
     # ========================================================================
-    employee_id: str | None = Field(default=None, max_length=50, index=True)
+    employee_id: str | None = Field(default=None, max_length=50, unique=True, index=True)
     branch_id: str | None = Field(default=None, max_length=50, index=True)
     department: str | None = Field(default=None, max_length=100)
 

@@ -31,6 +31,7 @@ class Training(TimestampMixin, SQLModel, table=True):
     capacity: int = Field(default=40, gt=0)
     status: TrainingStatus = Field(default=TrainingStatus.SCHEDULED, nullable=False, index=True)
     attendance_open: bool = Field(default=True, nullable=False, index=True)
+    trainer_reminder_sent_at: datetime | None = Field(default=None, nullable=True)
 
 
 class TrainingRegistration(TimestampMixin, SQLModel, table=True):
@@ -40,10 +41,11 @@ class TrainingRegistration(TimestampMixin, SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint(
             "training_id",
-            "role",
             "participant_code",
             name="uq_training_registration_identity",
         ),
+        UniqueConstraint("training_id", "phone", name="uq_training_registration_phone"),
+        UniqueConstraint("training_id", "email", name="uq_training_registration_email"),
     )
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
@@ -55,6 +57,7 @@ class TrainingRegistration(TimestampMixin, SQLModel, table=True):
     phone: str | None = Field(default=None, max_length=30)
     joined_at: datetime = Field(nullable=False, index=True)
     source: str = Field(default="qr_link", max_length=30)
+    reminder_sent_at: datetime | None = Field(default=None, nullable=True)
 
 
 class TrainingAttendance(TimestampMixin, SQLModel, table=True):

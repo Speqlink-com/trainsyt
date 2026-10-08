@@ -347,6 +347,7 @@ async def create_user(
         role=payload.role,
         phone_number=payload.phone_number,
         employee_id=payload.employee_id,
+        agent_code=payload.agent_code,
         branch_id=payload.branch_id,
         department=payload.department,
     )

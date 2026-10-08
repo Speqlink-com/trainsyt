@@ -1,7 +1,8 @@
 """Jubilee Learning Hub API application."""
 
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,7 @@ from app.core.database import database_ready, dispose_database
 from app.routes.auth import router as auth_router
 from app.routes.trainings import public_router as public_training_router
 from app.routes.trainings import router as training_router
+from app.services.training_reminder_service import training_reminder_service
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -22,8 +24,20 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Schema changes are owned by the one-shot Alembic service in Compose.
-    yield
-    await dispose_database()
+    reminder_task = None
+    if settings.TRAINING_REMINDERS_ENABLED:
+        reminder_task = asyncio.create_task(
+            training_reminder_service.run(),
+            name="training-reminder-scheduler",
+        )
+    try:
+        yield
+    finally:
+        if reminder_task:
+            reminder_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reminder_task
+        await dispose_database()
 
 
 app = FastAPI(

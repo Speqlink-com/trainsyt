@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.core.core import settings
 from app.core.security import (
@@ -60,6 +63,37 @@ class AuthService:
         if not valid:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=message)
 
+    @staticmethod
+    async def _require_admin_capacity(db: AsyncSession) -> None:
+        """Serialize administrator changes and enforce the active-account ceiling."""
+
+        admin_roles = (UserRole.SUPER_ADMIN, UserRole.ADMIN)
+        await db.execute(
+            select(User.id)
+            .where(
+                User.role.in_(admin_roles),
+                User.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        active_admin_count = await db.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(
+                User.role.in_(admin_roles),
+                User.is_active.is_(True),
+                User.deleted_at.is_(None),
+            )
+        )
+        if int(active_admin_count or 0) >= settings.MAX_ADMIN_ACCOUNTS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"The maximum of {settings.MAX_ADMIN_ACCOUNTS} active administrator "
+                    "accounts has been reached"
+                ),
+            )
+
     async def register_initial_admin(
         self,
         db: AsyncSession,
@@ -70,7 +104,7 @@ class AuthService:
         first_name: str,
         last_name: str,
         phone_number: str | None = None,
-    ) -> ProvisionOutcome:
+    ) -> User:
         expected_secret = settings.INITIAL_ADMIN_SECRET_KEY.get_secret_value()
         if not secrets.compare_digest(secret_key, expected_secret):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid setup secret")
@@ -456,9 +490,10 @@ class AuthService:
         role: UserRole,
         phone_number: str | None,
         employee_id: str | None,
+        agent_code: str | None,
         branch_id: str | None,
         department: str | None,
-    ) -> User:
+    ) -> ProvisionOutcome:
         if creator.role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access required")
         if role == UserRole.SUPER_ADMIN:
@@ -466,9 +501,25 @@ class AuthService:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Super administrators cannot be invited",
             )
+        if role == UserRole.ADMIN:
+            await self._require_admin_capacity(db)
         normalized_email = self.normalize_email(email)
-        if await user_repository.get_user_by_email(db, normalized_email):
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered")
+        identifier = agent_code or employee_id
+        conflicts = [func.lower(User.email) == normalized_email]
+        if phone_number:
+            conflicts.append(User.phone_number == phone_number)
+        if identifier:
+            conflicts.append(or_(User.employee_id == identifier, User.agent_code == identifier))
+        conflict_result = await db.execute(select(User).where(or_(*conflicts)))
+        conflict = conflict_result.scalars().first()
+        if conflict:
+            if conflict.email.lower() == normalized_email:
+                detail = "Email is already registered"
+            elif phone_number and conflict.phone_number == phone_number:
+                detail = "Phone number is already assigned to another user"
+            else:
+                detail = "Employee or agent code is already assigned to another user"
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
         temporary_password = generate_temporary_password()
         user = User(
@@ -479,6 +530,7 @@ class AuthService:
             role=role,
             phone_number=phone_number,
             employee_id=employee_id,
+            agent_code=agent_code,
             branch_id=branch_id,
             department=department,
             created_by_id=creator.id,
@@ -487,7 +539,14 @@ class AuthService:
             is_password_changed=False,
         )
         db.add(user)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email, phone number, or personnel code is already in use",
+            ) from exc
         await db.refresh(user)
 
         sent = await email_service.send_temporary_password(
@@ -559,6 +618,12 @@ class AuthService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only a super administrator can update this account",
             )
+        if (
+            is_active
+            and not user.is_active
+            and user.role in {UserRole.ADMIN, UserRole.SUPER_ADMIN}
+        ):
+            await self._require_admin_capacity(db)
 
         user.is_active = is_active
         if not is_active:

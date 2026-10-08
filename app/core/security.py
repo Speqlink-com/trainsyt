@@ -45,17 +45,16 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 
-def generate_temporary_password(length: int = 16) -> str:
-    if length < 12:
-        raise ValueError("Temporary passwords must contain at least 12 characters")
-    characters = string.ascii_letters + string.digits + "!@#$%^&*"
-    password = [
-        secrets.choice(string.ascii_uppercase),
-        secrets.choice(string.ascii_lowercase),
-        secrets.choice(string.digits),
-        secrets.choice("!@#$%^&*"),
-    ]
-    password.extend(secrets.choice(characters) for _ in range(length - len(password)))
+TEMPORARY_PASSWORD_SPECIAL_CHARACTERS = "!@#$%^&*"
+
+
+def generate_temporary_password() -> str:
+    """Return a six-character first-login password: four letters and two symbols."""
+
+    password = [secrets.choice(string.ascii_letters) for _ in range(4)]
+    password.extend(
+        secrets.choice(TEMPORARY_PASSWORD_SPECIAL_CHARACTERS) for _ in range(2)
+    )
     secrets.SystemRandom().shuffle(password)
     return "".join(password)
 

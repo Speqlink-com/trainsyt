@@ -14,6 +14,7 @@ from app.schemas.training import (
     PublicRegistrationRequest,
     TrainingCreateRequest,
     TrainingStatusUpdateRequest,
+    TrainingUpdateRequest,
 )
 from app.services.attendance_export import build_attendance_workbook
 from app.services.training_service import training_service
@@ -121,6 +122,45 @@ async def update_training_status(
         payload=payload,
     )
     return {"success": True, "message": "Training status updated", "data": {"training": training}}
+
+
+@router.patch("/{training_id}")
+async def update_training(
+    training_id: UUID,
+    payload: TrainingUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(validate_csrf),
+):
+    training = await training_service.update_training(
+        db,
+        current_user=current_user,
+        training_id=training_id,
+        payload=payload,
+    )
+    return {"success": True, "message": "Training programme updated", "data": {"training": training}}
+
+
+@router.delete("/{training_id}")
+async def delete_training(
+    training_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(validate_csrf),
+):
+    registrations, attendance = await training_service.delete_training(
+        db,
+        current_user=current_user,
+        training_id=training_id,
+    )
+    return {
+        "success": True,
+        "message": "Training programme deleted",
+        "data": {
+            "deleted_registrations": registrations,
+            "deleted_attendance_records": attendance,
+        },
+    }
 
 
 @public_router.get("/{public_code}")

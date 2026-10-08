@@ -5,7 +5,8 @@ from datetime import UTC
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_
+from sqlalchemy import delete, func, or_, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -23,6 +24,7 @@ from app.schemas.training import (
     TrainingCreateRequest,
     TrainingResponse,
     TrainingStatusUpdateRequest,
+    TrainingUpdateRequest,
 )
 
 MANAGER_ROLES = {UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.TRAINER}
@@ -59,6 +61,16 @@ class TrainingService:
     @staticmethod
     async def _get_training(db: AsyncSession, training_id: UUID) -> Training:
         training = await db.get(Training, training_id)
+        if not training:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Training not found")
+        return training
+
+    @staticmethod
+    async def _get_training_for_update(db: AsyncSession, training_id: UUID) -> Training:
+        result = await db.execute(
+            select(Training).where(Training.id == training_id).with_for_update()
+        )
+        training = result.scalars().first()
         if not training:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Training not found")
         return training
@@ -133,17 +145,24 @@ class TrainingService:
             )
         await self._trainer(db, trainer_id)
 
+        scheduled_at = (
+            payload.scheduled_at.astimezone(UTC).replace(tzinfo=None)
+            if payload.scheduled_at.tzinfo
+            else payload.scheduled_at
+        )
+        if scheduled_at <= utcnow():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Programme date and time must be in the future",
+            )
+
         training = Training(
             public_code=secrets.token_urlsafe(18),
             title=payload.title,
             description=payload.description,
             trainer_id=trainer_id,
             created_by_id=creator.id,
-            scheduled_at=(
-                payload.scheduled_at.astimezone(UTC).replace(tzinfo=None)
-                if payload.scheduled_at.tzinfo
-                else payload.scheduled_at
-            ),
+            scheduled_at=scheduled_at,
             duration_hours=payload.duration_hours,
             location=payload.location,
             audience_roles=[role.value for role in payload.audience_roles],
@@ -196,7 +215,7 @@ class TrainingService:
         training_id: UUID,
         payload: TrainingStatusUpdateRequest,
     ) -> TrainingResponse:
-        training = await self._get_training(db, training_id)
+        training = await self._get_training_for_update(db, training_id)
         self._require_training_manager(current_user, training)
         if payload.status is not None:
             training.status = payload.status
@@ -213,9 +232,166 @@ class TrainingService:
                 )
             training.attendance_open = payload.attendance_open
         db.add(training)
-        await db.commit()
+        try:
+            await db.commit()
+        except SQLAlchemyError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The programme status could not be saved",
+            ) from exc
         await db.refresh(training)
         return await self._response(db, training)
+
+    async def update_training(
+        self,
+        db: AsyncSession,
+        *,
+        current_user: User,
+        training_id: UUID,
+        payload: TrainingUpdateRequest,
+    ) -> TrainingResponse:
+        if current_user.role not in ADMIN_ROLES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Administrator access required",
+            )
+        training = await self._get_training_for_update(db, training_id)
+
+        if payload.expected_updated_at is not None:
+            expected_updated_at = payload.expected_updated_at.astimezone(UTC).replace(tzinfo=None)
+            if expected_updated_at != training.updated_at:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This programme was changed by another administrator. Reload and try again.",
+                )
+
+        if "trainer_id" in payload.model_fields_set and payload.trainer_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="A training programme must have an assigned trainer",
+            )
+
+        if payload.trainer_id is not None and payload.trainer_id != training.trainer_id:
+            await self._trainer(db, payload.trainer_id)
+            training.trainer_id = payload.trainer_id
+            training.trainer_reminder_sent_at = None
+
+        reset_participant_reminders = False
+        if payload.scheduled_at is not None:
+            scheduled_at = payload.scheduled_at.astimezone(UTC).replace(tzinfo=None)
+            if scheduled_at != training.scheduled_at:
+                if scheduled_at <= utcnow():
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail="A changed programme date and time must be in the future",
+                    )
+                training.scheduled_at = scheduled_at
+                training.trainer_reminder_sent_at = None
+                reset_participant_reminders = True
+
+        if payload.capacity is not None:
+            registration_count, _ = await self._counts(db, training.id)
+            if payload.capacity < registration_count:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Capacity cannot be lower than the current registration count",
+                )
+            training.capacity = payload.capacity
+
+        if payload.audience_roles is not None:
+            registered_roles_result = await db.execute(
+                select(TrainingRegistration.role)
+                .where(TrainingRegistration.training_id == training.id)
+                .distinct()
+            )
+            registered_roles = set(registered_roles_result.scalars().all())
+            requested_roles = set(payload.audience_roles)
+            if not registered_roles.issubset(requested_roles):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Audience roles cannot exclude participants who are already registered",
+                )
+            training.audience_roles = [role.value for role in payload.audience_roles]
+
+        for field in ("title", "description", "duration_hours", "location"):
+            value = getattr(payload, field)
+            if value is not None and value != getattr(training, field):
+                setattr(training, field, value)
+                if field in {"title", "location"}:
+                    training.trainer_reminder_sent_at = None
+                    reset_participant_reminders = True
+
+        next_status = payload.status if payload.status is not None else training.status
+        next_attendance_open = (
+            payload.attendance_open
+            if payload.attendance_open is not None
+            else training.attendance_open
+        )
+        if next_status in {TrainingStatus.COMPLETED, TrainingStatus.CANCELLED}:
+            if payload.attendance_open is True:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Attendance cannot be opened for a completed or cancelled programme",
+                )
+            next_attendance_open = False
+        training.status = next_status
+        training.attendance_open = next_attendance_open
+
+        if reset_participant_reminders:
+            await db.execute(
+                update(TrainingRegistration)
+                .where(TrainingRegistration.training_id == training.id)
+                .values(reminder_sent_at=None)
+            )
+        db.add(training)
+        try:
+            await db.commit()
+        except IntegrityError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The programme conflicts with existing training data",
+            ) from exc
+        except SQLAlchemyError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The programme update could not be saved",
+            ) from exc
+        await db.refresh(training)
+        return await self._response(db, training)
+
+    async def delete_training(
+        self,
+        db: AsyncSession,
+        *,
+        current_user: User,
+        training_id: UUID,
+    ) -> tuple[int, int]:
+        if current_user.role not in ADMIN_ROLES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Administrator access required",
+            )
+        training = await self._get_training_for_update(db, training_id)
+        registration_count, attendance_count = await self._counts(db, training.id)
+        try:
+            await db.execute(
+                delete(TrainingAttendance).where(TrainingAttendance.training_id == training.id)
+            )
+            await db.execute(
+                delete(TrainingRegistration).where(TrainingRegistration.training_id == training.id)
+            )
+            await db.delete(training)
+            await db.commit()
+        except SQLAlchemyError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The programme could not be deleted",
+            ) from exc
+        return registration_count, attendance_count
 
     async def trainer_options(
         self,
@@ -291,16 +467,46 @@ class TrainingService:
                 detail="This programme is not open to the selected role",
             )
 
-        normalized_code = payload.participant_code.strip().upper()
+        normalized_code = payload.participant_code
+        normalized_email = str(payload.email).lower() if payload.email else None
         existing_result = await db.execute(
             select(TrainingRegistration).where(
                 TrainingRegistration.training_id == training.id,
-                TrainingRegistration.role == payload.role,
                 TrainingRegistration.participant_code == normalized_code,
             )
         )
         registration = existing_result.scalars().first()
-        if not registration:
+        if registration:
+            same_identity = (
+                registration.participant_name.casefold() == payload.participant_name.casefold()
+                and registration.role == payload.role
+                and registration.email == normalized_email
+                and registration.phone == payload.phone
+            )
+            if not same_identity:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Participant code is already registered to different details",
+                )
+        else:
+            contact_conditions = [TrainingRegistration.phone == payload.phone]
+            if normalized_email:
+                contact_conditions.append(func.lower(TrainingRegistration.email) == normalized_email)
+            contact_result = await db.execute(
+                select(TrainingRegistration).where(
+                    TrainingRegistration.training_id == training.id,
+                    or_(*contact_conditions),
+                )
+            )
+            contact_conflict = contact_result.scalars().first()
+            if contact_conflict:
+                detail = (
+                    "Phone number is already registered for this programme"
+                    if contact_conflict.phone == payload.phone
+                    else "Email is already registered for this programme"
+                )
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
             registration_count = await db.scalar(
                 select(func.count())
                 .select_from(TrainingRegistration)
@@ -316,13 +522,20 @@ class TrainingService:
                 participant_name=payload.participant_name,
                 participant_code=normalized_code,
                 role=payload.role,
-                email=str(payload.email).lower() if payload.email else None,
+                email=normalized_email,
                 phone=payload.phone,
                 joined_at=utcnow(),
                 source="qr_link",
             )
             db.add(registration)
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError as exc:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Participant code, phone number, or email is already registered",
+                ) from exc
             await db.refresh(registration)
 
         attendance_result = await db.execute(
@@ -374,6 +587,11 @@ class TrainingService:
         training = training_result.scalars().first()
         if not training:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid attendance receipt")
+        if utcnow() < training.scheduled_at:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Attendance can only be marked from the scheduled meeting time",
+            )
         if not training.attendance_open or training.status in {
             TrainingStatus.COMPLETED,
             TrainingStatus.CANCELLED,

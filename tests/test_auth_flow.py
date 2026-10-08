@@ -1,11 +1,13 @@
 """End-to-end tests for the cookie-based authentication lifecycle."""
 
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func
+from pydantic import SecretStr
+from sqlalchemy import delete, func
 from sqlmodel import select
 
 from app.core.core import settings
 from app.core.database import async_session
+from app.core.security import hash_password
 from app.models.enums import UserRole
 from app.models.users import User
 from app.scripts.seed_admin import seed_admin
@@ -39,6 +41,123 @@ async def test_seed_admin_is_idempotent_and_can_login(client: AsyncClient) -> No
     assert client.cookies.get(settings.CSRF_COOKIE_NAME)
 
 
+async def test_seed_admin_temporary_password_requires_immediate_change(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:
+    async with async_session() as db:
+        await db.execute(delete(User))
+        await db.commit()
+
+    monkeypatch.setattr(settings, "SEED_ADMIN_EMAIL", "comsiwende@gmail.com")
+    monkeypatch.setattr(settings, "SEED_ADMIN_PASSWORD", SecretStr("Admin123"))
+    monkeypatch.setattr(settings, "SEED_ADMIN_FIRST_NAME", "Comfortine")
+    monkeypatch.setattr(settings, "SEED_ADMIN_LAST_NAME", "Siwende")
+    monkeypatch.setattr(settings, "SEED_ADMIN_FORCE_PASSWORD_CHANGE", True)
+
+    async with async_session() as db:
+        assert await seed_admin(db) is True
+        seeded = await db.scalar(
+            select(User).where(User.email == "comsiwende@gmail.com")
+        )
+    assert seeded
+    assert seeded.role == UserRole.SUPER_ADMIN
+    assert seeded.is_password_changed is False
+    assert seeded.last_password_change_at is None
+
+    first_login = await login(client, "comsiwende@gmail.com", "Admin123")
+    assert first_login.status_code == 200
+    assert first_login.json()["data"]["password_change_required"] is True
+    assert client.cookies.get("temp_token")
+    assert client.cookies.get("access_token") is None
+
+    changed = await client.post(
+        "/api/auth/first-time-password-change",
+        headers=csrf_headers(client),
+        json={
+            "new_password": "ProductionAdmin123!",
+            "confirm_password": "ProductionAdmin123!",
+        },
+    )
+    assert changed.status_code == 200, changed.text
+    assert client.cookies.get("temp_token") is None
+    assert client.cookies.get("access_token")
+
+
+async def test_at_most_six_active_administrator_accounts(
+    client: AsyncClient,
+    monkeypatch,
+) -> None:
+    async def accept_invitation(**_: str) -> bool:
+        return True
+
+    monkeypatch.setattr(email_service, "send_temporary_password", accept_invitation)
+    admin_login = await login(
+        client,
+        settings.SEED_ADMIN_EMAIL or "",
+        settings.SEED_ADMIN_PASSWORD.get_secret_value() if settings.SEED_ADMIN_PASSWORD else "",
+    )
+    assert admin_login.status_code == 200
+
+    password_hash = hash_password("AdminLimit123!")
+    administrators: list[User] = []
+    async with async_session() as db:
+        for index in range(5):
+            administrator = User(
+                email=f"administrator-{index}@example.com",
+                hashed_password=password_hash,
+                first_name="Limit",
+                last_name=f"Admin {index}",
+                role=UserRole.ADMIN,
+                employee_id=f"ADM-{index}",
+                phone_number=f"+2547000010{index:02d}",
+                is_active=True,
+                is_password_changed=True,
+                is_email_verified=True,
+            )
+            db.add(administrator)
+            administrators.append(administrator)
+        await db.commit()
+        for administrator in administrators:
+            await db.refresh(administrator)
+
+    rejected = await client.post(
+        "/api/auth/users",
+        headers=csrf_headers(client),
+        json={
+            "email": "seventh-admin@example.com",
+            "first_name": "Seventh",
+            "last_name": "Administrator",
+            "role": "admin",
+            "phone_number": "+254700001099",
+            "employee_id": "ADM-099",
+        },
+    )
+    assert rejected.status_code == 409
+    assert "maximum of 6" in rejected.json()["detail"].lower()
+
+    deactivated = await client.patch(
+        f"/api/auth/users/{administrators[0].id}/status",
+        headers=csrf_headers(client),
+        json={"is_active": False},
+    )
+    assert deactivated.status_code == 200
+
+    created = await client.post(
+        "/api/auth/users",
+        headers=csrf_headers(client),
+        json={
+            "email": "replacement-admin@example.com",
+            "first_name": "Replacement",
+            "last_name": "Administrator",
+            "role": "admin",
+            "phone_number": "+254700001098",
+            "employee_id": "ADM-098",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+
 async def test_invitation_first_login_rotation_replay_and_admin_control(
     client: AsyncClient,
     monkeypatch,
@@ -65,6 +184,7 @@ async def test_invitation_first_login_rotation_replay_and_admin_control(
             "first_name": "Training",
             "last_name": "Lead",
             "role": "trainer",
+            "phone_number": "0700 000 010",
             "employee_id": "TR-001",
             "department": "Learning",
         },
@@ -74,6 +194,36 @@ async def test_invitation_first_login_rotation_replay_and_admin_control(
     invited_user = invitation.json()["data"]["user"]
     assert delivered["email"] == "trainer@example.com"
     assert delivered["temporary_password"]
+
+    duplicate_phone = await client.post(
+        "/api/auth/users",
+        headers=csrf_headers(client),
+        json={
+            "email": "another@example.com",
+            "first_name": "Another",
+            "last_name": "Trainer",
+            "role": "trainer",
+            "phone_number": "+254700000010",
+            "employee_id": "TR-002",
+        },
+    )
+    assert duplicate_phone.status_code == 409
+    assert "phone number" in duplicate_phone.json()["detail"].lower()
+
+    duplicate_identifier = await client.post(
+        "/api/auth/users",
+        headers=csrf_headers(client),
+        json={
+            "email": "third@example.com",
+            "first_name": "Third",
+            "last_name": "Trainer",
+            "role": "trainer",
+            "phone_number": "+254700000011",
+            "employee_id": "tr-001",
+        },
+    )
+    assert duplicate_identifier.status_code == 409
+    assert "code" in duplicate_identifier.json()["detail"].lower()
 
     listing = await client.get("/api/auth/users", params={"role": "trainer"})
     assert listing.status_code == 200
@@ -161,6 +311,8 @@ async def test_user_is_preserved_when_invitation_delivery_fails(
             "first_name": "Pending",
             "last_name": "Trainer",
             "role": "trainer",
+            "phone_number": "+254700000020",
+            "employee_id": "TR-020",
         },
     )
 
@@ -203,6 +355,8 @@ async def test_password_reset_uses_one_time_hashed_code(client: AsyncClient, mon
             "first_name": "Field",
             "last_name": "Agent",
             "role": "agent",
+            "phone_number": "+254700000030",
+            "agent_code": "AGT-030",
         },
     )
     assert created.status_code == 201
