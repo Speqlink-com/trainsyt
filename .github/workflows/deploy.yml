@@ -17,7 +17,7 @@ env:
   IMAGE_NAME: trainsyt-server
   DEPLOY_DIR: /home/deploy/apps/trainsyt
   FRONTEND_URL: https://jb.training.speqlink.com
-  API_URL: https://trainsyt.speqlink.com
+  API_URL: https://trainsyt.speqlink.com:2096
   API_DOMAIN: trainsyt.speqlink.com
 
 jobs:

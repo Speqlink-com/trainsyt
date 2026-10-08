@@ -5,7 +5,7 @@ The production deployment follows the SafeSport pattern: GitHub-hosted CI runs t
 The configured origins are:
 
 - Frontend: `https://jb.training.speqlink.com`
-- API: `https://trainsyt.speqlink.com`
+- API: `https://trainsyt.speqlink.com:2096`
 - Authentication cookies: host-only through the frontend's same-origin `/backend` proxy
 
 ## One-time VPS preparation
@@ -33,12 +33,12 @@ Before enabling the public health check:
 2. Create or install a Cloudflare Origin Certificate covering `trainsyt.speqlink.com` (or `*.speqlink.com`) as `cert.pem` and `key.pem` in the directory above.
 3. Add a Cloudflare Origin Rule that routes `trainsyt.speqlink.com` to HTTPS port `2096`, matching the pattern already used by the other VPS applications.
 4. Use Full (strict) SSL mode.
-5. Confirm `https://trainsyt.speqlink.com/health/ready` returns a ready response.
+5. Confirm `https://trainsyt.speqlink.com:2096/health/ready` returns a ready response.
 6. Set the GitHub production environment variable `TRAINSYT_PUBLIC_HEALTHCHECK_ENABLED=true`.
 
 Until step 6, deployments still perform a mandatory health check inside the API container. This permits the first deployment before the public DNS route exists.
 
-In the Vercel frontend project, keep `NEXT_PUBLIC_API_URL=/backend`, set `API_PROXY_TARGET=https://trainsyt.speqlink.com`, and redeploy the frontend after the API DNS record is active.
+In the Vercel frontend project, keep `NEXT_PUBLIC_API_URL=/backend`, set `API_PROXY_TARGET=https://trainsyt.speqlink.com:2096`, and redeploy the frontend after the API DNS record is active. Port `2096` reaches Trainsyt directly; the shared port `443` listener is managed by Kong.
 
 ## GitHub production environment
 
