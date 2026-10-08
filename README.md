@@ -111,4 +111,4 @@ The tests use an isolated SQLite database while production and Docker use Postgr
 
 ## VPS deployment
 
-Production deployment through the VPS GitHub runner is defined in `.github/workflows/deploy.yml`. It builds an immutable image, backs up PostgreSQL, applies Alembic migrations, seeds the administrator idempotently, and health-checks the API. See [docs/deployment.md](docs/deployment.md) for the one-time server, Cloudflare, and GitHub environment setup.
+Production deployment through the VPS GitHub runner is defined in `.github/workflows/deploy.yml`. It builds an immutable image, backs up PostgreSQL, applies Alembic migrations, seeds the administrator idempotently, and health-checks the API. See [docs/deployment.md](docs/deployment.md) for the one-time server, Cloudflare, and GitHub environment setup.....
